@@ -74,7 +74,8 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          python main.py --once
+          # Run continuously for up to 4 minutes (leaving 1 min buffer before next scheduled run)
+          timeout 240 python main.py
 
       - name: Check for Instance Created
         if: always()
