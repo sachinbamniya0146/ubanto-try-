@@ -1,0 +1,102 @@
+name: Oracle Free Tier Instance Creation
+
+on:
+  schedule:
+    # Run every 5 minutes (matches your watchdog cron)
+    - cron: '*/5 * * * *'
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+  push:
+    branches: [main]
+    paths:
+      - 'oci.env'
+      - 'main.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  oracle-retry:
+    name: Oracle Free Tier Retry
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    # Prevent concurrent runs - only one at a time
+    concurrency:
+      group: oracle-freetier-retry
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install OCI CLI and Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install oci python-dotenv paramiko requests
+          # Install OCI CLI for additional verification
+          bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Decode and setup OCI config
+        env:
+          OCI_CONFIG_B64: ${{ secrets.OCI_CONFIG_B64 }}
+          OCI_KEY_B64: ${{ secrets.OCI_KEY_B64 }}
+        run: |
+          mkdir -p ~/.oci
+          echo "$OCI_CONFIG_B64" | base64 -d > ~/.oci/config
+          echo "$OCI_KEY_B64" | base64 -d > ~/.oci/oci-keyfile.pem
+          chmod 600 ~/.oci/config ~/.oci/oci-keyfile.pem
+          
+      - name: Setup SSH key
+        env:
+          SSH_PUB_B64: ${{ secrets.SSH_PUB_B64 }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PUB_B64" | base64 -d > ~/.ssh/oracle_key.pub
+          chmod 644 ~/.ssh/oracle_key.pub
+          
+      - name: Create oci.env from secrets
+        env:
+          OCI_ENV_B64: ${{ secrets.OCI_ENV_B64 }}
+        run: |
+          echo "$OCI_ENV_B64" | base64 -d > oci.env
+          
+      - name: Run Oracle Instance Creation Script
+        env:
+          # Pass sensitive values that might be in oci.env
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          python main.py --once
+
+      - name: Check for Instance Created
+        if: always()
+        run: |
+          if [ -f "INSTANCE_CREATED" ]; then
+            echo "🎉 INSTANCE CREATED SUCCESSFULLY!"
+            cat INSTANCE_CREATED
+            # Create a summary for GitHub Actions UI
+            echo "## Oracle Instance Created" >> $GITHUB_STEP_SUMMARY
+            cat INSTANCE_CREATED >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No instance created yet, will retry on next run"
+          fi
+
+      - name: Upload logs as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-logs-${{ github.run_id }}
+          path: |
+            *.log
+            INSTANCE_CREATED
+            UNHANDLED_ERROR.log
+            images_list.json
+          retention-days: 30

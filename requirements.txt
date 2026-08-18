@@ -1,0 +1,5 @@
+# Oracle Free Tier Automation - GitHub Actions
+oci
+python-dotenv
+paramiko
+requests

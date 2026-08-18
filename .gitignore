@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Logs and artifacts
+*.log
+INSTANCE_CREATED
+UNHANDLED_ERROR.log
+images_list.json
+ERROR_IN_CONFIG.log
+setup_and_info.log
+launch_instance.log
+oci_loop.log
+
+# Environment files
+oci.env
+.env
+*.env
+
+# OCI config and keys
+.oci/
+*.pem
+*.key
+*.pub
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# GitHub Actions artifacts
+*.artifact/
