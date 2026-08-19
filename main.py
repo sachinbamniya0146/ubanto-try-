@@ -23,11 +23,11 @@ ARM_SHAPE = "VM.Standard.A1.Flex"
 E2_MICRO_SHAPE = "VM.Standard.E2.1.Micro"
 
 # Access loaded environment variables and strip white spaces
-OCI_CONFIG = os.getenv("OCI_CONFIG", "").strip()
+OCI_CONFIG = os.path.expanduser(os.getenv("OCI_CONFIG", "").strip())
 OCT_FREE_AD = os.getenv("OCT_FREE_AD", "").strip()
 DISPLAY_NAME = os.getenv("DISPLAY_NAME", "").strip()
 WAIT_TIME = int(os.getenv("REQUEST_WAIT_TIME_SECS", "0").strip())
-SSH_AUTHORIZED_KEYS_FILE = os.getenv("SSH_AUTHORIZED_KEYS_FILE", "").strip()
+SSH_AUTHORIZED_KEYS_FILE = os.path.expanduser(os.getenv("SSH_AUTHORIZED_KEYS_FILE", "").strip())
 OCI_IMAGE_ID = os.getenv("OCI_IMAGE_ID", None).strip() if os.getenv("OCI_IMAGE_ID") else None
 OCI_COMPUTE_SHAPE = os.getenv("OCI_COMPUTE_SHAPE", ARM_SHAPE).strip()
 SECOND_MICRO_INSTANCE = os.getenv("SECOND_MICRO_INSTANCE", 'False').strip().lower() == 'true'
@@ -43,6 +43,7 @@ DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK", "").strip()
 
 # Read the configuration from oci_config file
 config = configparser.ConfigParser()
+OCI_USER_ID = None
 try:
     config.read(OCI_CONFIG)
     OCI_USER_ID = config.get('DEFAULT', 'user')
@@ -60,13 +61,18 @@ try:
     if env_has_spaces:
         raise ValueError("oci.env has spaces in values which is not acceptable")
     if config_has_spaces:
-        raise ValueError("oci_config has spaces in values which is not acceptable")        
+        raise ValueError("oci_config has spaces in values which is not acceptable")       
 
 except configparser.Error as e:
     with open("ERROR_IN_CONFIG.log", "w", encoding='utf-8') as file:
         file.write(str(e))
 
     print(f"Error reading the configuration file: {e}")
+    sys.exit(1)
+
+if not OCI_USER_ID:
+    print("Error: OCI_USER_ID not found in config")
+    sys.exit(1)
 
 # Set up logging
 logging.basicConfig(
@@ -81,7 +87,7 @@ fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logging_step5.addHandler(fh)
 
 # Set up OCI Config and Clients
-oci_config_path = OCI_CONFIG if OCI_CONFIG else "~/.oci/config"
+oci_config_path = OCI_CONFIG if OCI_CONFIG else os.path.expanduser("~/.oci/config")
 config = oci.config.from_file(oci_config_path)
 iam_client = oci.identity.IdentityClient(config)
 network_client = oci.core.VirtualNetworkClient(config)
