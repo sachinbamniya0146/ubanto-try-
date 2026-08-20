@@ -86,12 +86,29 @@ fh = logging.FileHandler("launch_instance.log")
 fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logging_step5.addHandler(fh)
 
-# Set up OCI Config and Clients
+# Set up OCI Config and Clients - use manual Signer to bypass fingerprint validation
 oci_config_path = OCI_CONFIG if OCI_CONFIG else os.path.expanduser("~/.oci/config")
-config = oci.config.from_file(oci_config_path)
-iam_client = oci.identity.IdentityClient(config)
-network_client = oci.core.VirtualNetworkClient(config)
-compute_client = oci.core.ComputeClient(config)
+config = configparser.ConfigParser()
+config.read(oci_config_path)
+
+# Read private key content directly (bypasses fingerprint validation)
+key_file_path = os.path.expanduser(config.get('DEFAULT', 'key_file'))
+with open(key_file_path, 'r') as f:
+    private_key_content = f.read()
+
+# Create signer with private key content (no fingerprint validation needed)
+signer = oci.signer.Signer(
+    tenancy=config.get('DEFAULT', 'tenancy'),
+    user=config.get('DEFAULT', 'user'),
+    fingerprint=config.get('DEFAULT', 'fingerprint'),
+    private_key_content=private_key_content
+)
+
+# Create clients with signer (config dict can be minimal)
+client_config = {"region": config.get('DEFAULT', 'region')}
+iam_client = oci.identity.IdentityClient(client_config, signer=signer)
+network_client = oci.core.VirtualNetworkClient(client_config, signer=signer)
+compute_client = oci.core.ComputeClient(client_config, signer=signer)
 
 IMAGE_LIST_KEYS = [
     "lifecycle_state",
