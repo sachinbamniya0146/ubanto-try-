@@ -40,6 +40,8 @@ NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL", 'False').strip().lower() == 'true'
 EMAIL = os.getenv("EMAIL", "").strip()
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "").strip()
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 # Read the configuration from oci_config file
 config = configparser.ConfigParser()
@@ -402,6 +404,24 @@ def send_discord_message(message):
             logging.error("Failed to send Discord message: %s", e)
 
 
+def send_telegram_message(message):
+    """Send a message to Telegram using the Bot API, if configured."""
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            logging.error("Failed to send Telegram message: %s", e)
+
+
+def notify_all(message):
+    """Send the same message to every configured notification channel."""
+    send_discord_message(message)
+    send_telegram_message(message)
+
+
 def launch_instance():
     """Launches an OCI Compute instance using the specified parameters.
 
@@ -532,14 +552,14 @@ if __name__ == "__main__":
     parser.add_argument('--once', action='store_true', help='Run once and exit (for GitHub Actions)')
     args = parser.parse_args()
     
-    send_discord_message("🚀 OCI Instance Creation Script: Starting up! Let's create some cloud magic!")
+    notify_all("🚀 OCI Instance Creation Script: Starting up! Let's create some cloud magic!")
     try:
         launch_instance()
-        send_discord_message("🎉 Success! OCI Instance has been created. Time to celebrate!")
+        notify_all("🎉 Success! OCI Instance has been created. Time to celebrate!")
         if args.once:
             print("Instance created successfully, exiting.")
             sys.exit(0)
     except Exception as e:
         error_message = f"😱 Oops! Something went wrong with the OCI Instance Creation Script:\n{str(e)}"
-        send_discord_message(error_message)
+        notify_all(error_message)
         raise
