@@ -43,20 +43,47 @@ jobs:
 
       - name: Decode and setup OCI config
         run: |
+          decode_or_copy_secret() {
+            local secret_value="$1"
+            local output_path="$2"
+            if printf '%s' "$secret_value" | base64 --decode > "$output_path" 2>/dev/null; then
+              return 0
+            fi
+            printf '%s' "$secret_value" > "$output_path"
+          }
+
           mkdir -p ~/.oci
-          echo "${{ secrets.OCI_CONFIG_B64 }}" | base64 -d > ~/.oci/config
-          echo "${{ secrets.OCI_KEY_B64 }}" | base64 -d > ~/.oci/oci-keyfile.pem
+          decode_or_copy_secret "${{ secrets.OCI_CONFIG_B64 }}" ~/.oci/config
+          decode_or_copy_secret "${{ secrets.OCI_KEY_B64 }}" ~/.oci/oci-keyfile.pem
           chmod 600 ~/.oci/config ~/.oci/oci-keyfile.pem
 
       - name: Setup SSH key
         run: |
+          decode_or_copy_secret() {
+            local secret_value="$1"
+            local output_path="$2"
+            if printf '%s' "$secret_value" | base64 --decode > "$output_path" 2>/dev/null; then
+              return 0
+            fi
+            printf '%s' "$secret_value" > "$output_path"
+          }
+
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PUB_B64 }}" | base64 -d > ~/.ssh/oracle_key.pub
+          decode_or_copy_secret "${{ secrets.SSH_PUB_B64 }}" ~/.ssh/oracle_key.pub
           chmod 644 ~/.ssh/oracle_key.pub
 
       - name: Create oci.env
         run: |
-          echo "${{ secrets.OCI_ENV_B64 }}" | base64 -d > oci.env
+          decode_or_copy_secret() {
+            local secret_value="$1"
+            local output_path="$2"
+            if printf '%s' "$secret_value" | base64 --decode > "$output_path" 2>/dev/null; then
+              return 0
+            fi
+            printf '%s' "$secret_value" > "$output_path"
+          }
+
+          decode_or_copy_secret "${{ secrets.OCI_ENV_B64 }}" oci.env
 
       - name: Run Oracle Instance Creation Script
         env:
