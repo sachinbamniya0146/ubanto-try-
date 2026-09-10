@@ -99,13 +99,14 @@ with open(key_file_path, 'r') as f:
     private_key_content = f.read()
 
 # Create signer with private key content (no fingerprint validation needed)
+# Create signer with private key content (no fingerprint validation needed)
 signer = oci.signer.Signer(
     tenancy=config.get('DEFAULT', 'tenancy'),
     user=config.get('DEFAULT', 'user'),
     fingerprint=config.get('DEFAULT', 'fingerprint'),
+    private_key_file_location=key_file_path,
     private_key_content=private_key_content
 )
-
 # Create clients with signer (config dict can be minimal)
 client_config = {"region": config.get('DEFAULT', 'region')}
 iam_client = oci.identity.IdentityClient(client_config, signer=signer)
