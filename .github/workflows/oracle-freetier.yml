@@ -42,21 +42,62 @@ jobs:
           echo "$HOME/bin" >> $GITHUB_PATH
 
       - name: Decode and setup OCI config
+        env:
+          OCI_CONFIG_B64: ${{ secrets.OCI_CONFIG_B64 }}
+          OCI_KEY_B64: ${{ secrets.OCI_KEY_B64 }}
         run: |
+          set -euo pipefail
+          decode_secret() {
+            local name="$1" value="$2" out="$3"
+            if [ -z "$value" ]; then
+              echo "::error::Secret '$name' is empty or not set in repo Settings > Secrets and variables > Actions."
+              exit 1
+            fi
+            # Strip whitespace/newlines the secret UI or copy-paste may have introduced,
+            # then decode. --ignore-garbage tolerates stray non-base64 chars (e.g. trailing %).
+            if ! printf '%s' "$value" | tr -d '[:space:]' | base64 -d --ignore-garbage > "$out"; then
+              echo "::error::Secret '$name' is not valid base64. Re-encode the source file with: base64 -w 0 <file> and replace the secret value."
+              exit 1
+            fi
+            if [ ! -s "$out" ]; then
+              echo "::error::Decoded '$name' produced an empty file — the secret content is likely wrong."
+              exit 1
+            fi
+          }
           mkdir -p ~/.oci
-          echo "${{ secrets.OCI_CONFIG_B64 }}" | base64 -d > ~/.oci/config
-          echo "${{ secrets.OCI_KEY_B64 }}" | base64 -d > ~/.oci/oci-keyfile.pem
+          decode_secret "OCI_CONFIG_B64" "$OCI_CONFIG_B64" ~/.oci/config
+          decode_secret "OCI_KEY_B64" "$OCI_KEY_B64" ~/.oci/oci-keyfile.pem
           chmod 600 ~/.oci/config ~/.oci/oci-keyfile.pem
 
       - name: Setup SSH key
+        env:
+          SSH_PUB_B64: ${{ secrets.SSH_PUB_B64 }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PUB_B64 }}" | base64 -d > ~/.ssh/oracle_key.pub
+          if [ -z "$SSH_PUB_B64" ]; then
+            echo "::error::Secret 'SSH_PUB_B64' is empty or not set."
+            exit 1
+          fi
+          if ! printf '%s' "$SSH_PUB_B64" | tr -d '[:space:]' | base64 -d --ignore-garbage > ~/.ssh/oracle_key.pub; then
+            echo "::error::Secret 'SSH_PUB_B64' is not valid base64. Re-encode with: base64 -w 0 <file>."
+            exit 1
+          fi
           chmod 644 ~/.ssh/oracle_key.pub
 
       - name: Create oci.env
+        env:
+          OCI_ENV_B64: ${{ secrets.OCI_ENV_B64 }}
         run: |
-          echo "${{ secrets.OCI_ENV_B64 }}" | base64 -d > oci.env
+          set -euo pipefail
+          if [ -z "$OCI_ENV_B64" ]; then
+            echo "::error::Secret 'OCI_ENV_B64' is empty or not set."
+            exit 1
+          fi
+          if ! printf '%s' "$OCI_ENV_B64" | tr -d '[:space:]' | base64 -d --ignore-garbage > oci.env; then
+            echo "::error::Secret 'OCI_ENV_B64' is not valid base64. Re-encode with: base64 -w 0 <file>."
+            exit 1
+          fi
 
       - name: Run Oracle Instance Creation Script
         env:
