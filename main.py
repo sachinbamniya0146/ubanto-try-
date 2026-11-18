@@ -3,6 +3,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import smtplib
 import sys
 import time
@@ -46,12 +47,26 @@ DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
+
+def normalize_fingerprint(fp):
+    """Normalize fingerprint: strip whitespace, lowercase, fix missing colons."""
+    if not fp:
+        return fp
+    # Remove all whitespace, quotes, and anything non-hex-non-colon
+    fp = fp.strip().strip('"').strip("'").lower()
+    fp = re.sub(r'[^0-9a-f:]', '', fp)
+    # If exactly 32 hex chars with no colons, insert colons every 2 chars
+    if ':' not in fp and len(fp) == 32:
+        fp = ':'.join(fp[i:i+2] for i in range(0, 32, 2))
+    return fp
+
+
 # Read the configuration from oci_config file
 config = configparser.ConfigParser()
 OCI_USER_ID = None
 try:
     config.read(OCI_CONFIG)
-    OCI_USER_ID = config.get('DEFAULT', 'user')
+    OCI_USER_ID = config.get('DEFAULT', 'user').strip()
     if OCI_COMPUTE_SHAPE not in (ARM_SHAPE, E2_MICRO_SHAPE):
         raise ValueError(f"{OCI_COMPUTE_SHAPE} is not an acceptable shape")
 
@@ -78,37 +93,50 @@ fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logging_step5.addHandler(fh)
 
 # ==========================================================================
-# >>> FIX: Build a FULL client_config dict (not just region) <<<
-# Earlier bug: only {"region": ...} was passed, so IdentityClient's
-# validate_config() reported tenancy/user/fingerprint/key_file as missing.
+# >>> FIX v2: Use Signer to BYPASS local fingerprint validation <<<
+# OCI SDK's validate_config() rejects "malformed" fingerprints locally.
+# Signer approach: build Signer with raw fingerprint, pass minimal config
+# (only region). SDK then only validates region. If fingerprint is truly
+# wrong, API server returns 401 — we catch that with a clear message.
 # ==========================================================================
 oci_config_path = OCI_CONFIG if OCI_CONFIG else os.path.expanduser("~/.oci/config")
 config = configparser.ConfigParser()
 config.read(oci_config_path)
 
-key_file_path = os.path.expanduser(config.get('DEFAULT', 'key_file'))
+key_file_path = os.path.expanduser(config.get('DEFAULT', 'key_file').strip())
+raw_tenancy = config.get('DEFAULT', 'tenancy').strip()
+raw_user = config.get('DEFAULT', 'user').strip()
+raw_fingerprint = normalize_fingerprint(config.get('DEFAULT', 'fingerprint'))
+raw_region = config.get('DEFAULT', 'region').strip()
 
-# Build the full config dict that OCI SDK expects
-client_config = {
-    "user": config.get('DEFAULT', 'user'),
-    "fingerprint": config.get('DEFAULT', 'fingerprint'),
-    "tenancy": config.get('DEFAULT', 'tenancy'),
-    "region": config.get('DEFAULT', 'region'),
-    "key_file": key_file_path,
-}
+# Diagnostic print (safe — just lengths and partial values, no secrets)
+print(f"[Config check] tenancy starts with: {raw_tenancy[:20]}... (len={len(raw_tenancy)})")
+print(f"[Config check] user starts with: {raw_user[:20]}... (len={len(raw_user)})")
+print(f"[Config check] fingerprint: {raw_fingerprint} (len={len(raw_fingerprint)})")
+print(f"[Config check] region: {raw_region}")
+print(f"[Config check] key_file path: {key_file_path} (exists: {os.path.exists(key_file_path)})")
 
-# Validate and build clients — SDK will read key_file itself
+# Build Signer directly — this does NOT call validate_config
 try:
-    oci.config.validate_config(client_config)
-except oci.exceptions.InvalidConfig as cfg_err:
-    print(f"OCI config invalid: {cfg_err}")
+    signer = oci.signer.Signer(
+        tenancy=raw_tenancy,
+        user=raw_user,
+        fingerprint=raw_fingerprint,
+        private_key_file_location=key_file_path,
+    )
+except Exception as e:
+    print(f"Signer creation failed: {e}")
     with open("ERROR_IN_CONFIG.log", "w", encoding='utf-8') as file:
-        file.write(str(cfg_err))
+        file.write(f"Signer creation failed: {e}")
     sys.exit(1)
 
-iam_client = oci.identity.IdentityClient(client_config)
-network_client = oci.core.VirtualNetworkClient(client_config)
-compute_client = oci.core.ComputeClient(client_config)
+# Minimal config — ONLY region. Signer handles auth.
+# With signer passed, validate_config() only checks for 'region'.
+client_config = {"region": raw_region}
+
+iam_client = oci.identity.IdentityClient(client_config, signer=signer)
+network_client = oci.core.VirtualNetworkClient(client_config, signer=signer)
+compute_client = oci.core.ComputeClient(client_config, signer=signer)
 
 IMAGE_LIST_KEYS = [
     "lifecycle_state",
@@ -231,6 +259,17 @@ def handle_errors(command, data, log):
         log.info("Command: %s~~\nOutput: %s", command, data)
         time.sleep(WAIT_TIME)
         return True
+    # 401 = bad fingerprint / key mismatch — permanent, not retry-able
+    if data.get("status") == 401 or data.get("code") == "NotAuthenticated":
+        msg = ("Authentication failed (401). Likely cause: fingerprint in OCI_CONFIG_B64 "
+               "does not match the API key you uploaded in OCI Console. "
+               "Check: OCI Console → Profile → API Keys → fingerprint column, "
+               "copy that EXACT value into your config file's `fingerprint=` line, "
+               "then re-run: base64 -w 0 ~/.oci/config  and update OCI_CONFIG_B64 secret.")
+        log.error(msg)
+        print(msg)
+        notify_on_failure(msg)
+        sys.exit(1)
     failure_msg = '\n'.join([f'{key}: {value}' for key, value in data.items()])
     notify_on_failure(failure_msg)
     raise Exception("Error: %s" % data)
@@ -298,12 +337,13 @@ def notify_all(message):
 
 
 def launch_instance():
-    # Step 1 - Get TENANCY
+    # Step 1 - Get TENANCY (first live API call — proves auth works)
     user_info = execute_oci_command(iam_client, "get_user", OCI_USER_ID)
     oci_tenancy = user_info.compartment_id
     logging.info("OCI_TENANCY: %s", oci_tenancy)
+    print(f"[Auth OK] Connected to tenancy: {oci_tenancy}")
 
-    # Step 2 - Get AD Name — try ALL ADs (AD-1, AD-2, AD-3) for best chance
+    # Step 2 - Get AD Name — try ALL ADs for best capacity chance
     availability_domains = execute_oci_command(iam_client,
                                                "list_availability_domains",
                                                compartment_id=oci_tenancy)
@@ -311,10 +351,10 @@ def launch_instance():
         oci_ad_name = [item.name for item in availability_domains if
                        any(item.name.endswith(oct_ad) for oct_ad in OCT_FREE_AD.split(","))]
     else:
-        # If OCT_FREE_AD not set, try ALL ADs (better capacity chance)
         oci_ad_name = [item.name for item in availability_domains]
     oci_ad_names = itertools.cycle(oci_ad_name)
     logging.info("OCI_AD_NAME: %s", oci_ad_name)
+    print(f"[ADs] Will try: {oci_ad_name}")
 
     # Step 3 - Get Subnet ID
     oci_subnet_id = OCI_SUBNET_ID
@@ -347,15 +387,16 @@ def launch_instance():
     boot_volume_size = max(50, int(BOOT_VOLUME_SIZE))
     ssh_public_key = read_or_generate_ssh_public_key(SSH_AUTHORIZED_KEYS_FILE)
 
-    # Step 5 - Launch Instance if it's not already exist and running
+    # Step 5 - Launch Instance if not already running
     instance_exist_flag = check_instance_state_and_write(oci_tenancy, OCI_COMPUTE_SHAPE, tries=1)
 
-    # >>> SHAPE CONFIG — reads from oci.env (OCI_OCPUS, OCI_MEMORY_GB) <<<
+    # Shape config — defaults 2 OCPU / 12 GB; override via oci.env
     if OCI_COMPUTE_SHAPE == "VM.Standard.A1.Flex":
         shape_config = oci.core.models.LaunchInstanceShapeConfigDetails(
             ocpus=OCI_OCPUS, memory_in_gbs=OCI_MEMORY_GB
         )
         logging.info("ARM shape_config: ocpus=%s memory=%s GB", OCI_OCPUS, OCI_MEMORY_GB)
+        print(f"[Shape] Requesting {OCI_OCPUS} OCPU / {OCI_MEMORY_GB} GB RAM")
     else:
         shape_config = oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=1, memory_in_gbs=1)
 
@@ -398,7 +439,7 @@ def launch_instance():
 
             except oci.exceptions.ServiceError as srv_err:
                 if srv_err.code == "LimitExceeded":
-                    logging_step5.info("Encountered LimitExceeded code:%s message:%s status:%s",
+                    logging_step5.info("LimitExceeded code:%s message:%s status:%s",
                                        srv_err.code, srv_err.message, srv_err.status)
                     instance_exist_flag = check_instance_state_and_write(oci_tenancy, OCI_COMPUTE_SHAPE)
                     if instance_exist_flag:
