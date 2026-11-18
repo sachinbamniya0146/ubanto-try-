@@ -66,8 +66,13 @@ jobs:
           }
           mkdir -p ~/.oci
           decode_secret "OCI_CONFIG_B64" "$OCI_CONFIG_B64" ~/.oci/config
-          decode_secret "OCI_KEY_B64" "$OCI_KEY_B64" ~/.oci/oci-keyfile.pem
-          chmod 600 ~/.oci/config ~/.oci/oci-keyfile.pem
+          decode_secret "OCI_KEY_B64" "$OCI_KEY_B64" ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
+          # Verify key file is readable and has BEGIN marker
+          echo "Key file first line:"
+          head -1 ~/.oci/oci_api_key.pem
+          echo "Config file contents:"
+          cat ~/.oci/config
 
       - name: Setup SSH key
         env:
