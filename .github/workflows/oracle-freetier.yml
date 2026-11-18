@@ -2,9 +2,8 @@ name: Oracle Free Tier Instance Creation
 
 on:
   schedule:
-    # Run every 5 minutes (matches your watchdog cron)
     - cron: '*/5 * * * *'
-  workflow_dispatch:  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
   push:
     branches: [main]
 
@@ -18,7 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    # Prevent concurrent runs - only one at a time
     concurrency:
       group: oracle-freetier-retry
       cancel-in-progress: false
@@ -37,7 +35,6 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install oci python-dotenv paramiko requests
-          # Install OCI CLI for additional verification
           bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
           echo "$HOME/bin" >> $GITHUB_PATH
 
@@ -50,17 +47,15 @@ jobs:
           decode_secret() {
             local name="$1" value="$2" out="$3"
             if [ -z "$value" ]; then
-              echo "::error::Secret '$name' is empty or not set in repo Settings > Secrets and variables > Actions."
+              echo "::error::Secret '$name' is empty."
               exit 1
             fi
-            # Strip whitespace/newlines the secret UI or copy-paste may have introduced,
-            # then decode. --ignore-garbage tolerates stray non-base64 chars (e.g. trailing %).
             if ! printf '%s' "$value" | tr -d '[:space:]' | base64 -d --ignore-garbage > "$out"; then
-              echo "::error::Secret '$name' is not valid base64. Re-encode the source file with: base64 -w 0 <file> and replace the secret value."
+              echo "::error::Secret '$name' is not valid base64."
               exit 1
             fi
             if [ ! -s "$out" ]; then
-              echo "::error::Decoded '$name' produced an empty file — the secret content is likely wrong."
+              echo "::error::Decoded '$name' produced empty file."
               exit 1
             fi
           }
@@ -68,10 +63,9 @@ jobs:
           decode_secret "OCI_CONFIG_B64" "$OCI_CONFIG_B64" ~/.oci/config
           decode_secret "OCI_KEY_B64" "$OCI_KEY_B64" ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
-          # Verify key file is readable and has BEGIN marker
           echo "Key file first line:"
           head -1 ~/.oci/oci_api_key.pem
-          echo "Config file contents:"
+          echo "Config:"
           cat ~/.oci/config
 
       - name: Setup SSH key
@@ -81,13 +75,10 @@ jobs:
           set -euo pipefail
           mkdir -p ~/.ssh
           if [ -z "$SSH_PUB_B64" ]; then
-            echo "::error::Secret 'SSH_PUB_B64' is empty or not set."
+            echo "::error::SSH_PUB_B64 is empty."
             exit 1
           fi
-          if ! printf '%s' "$SSH_PUB_B64" | tr -d '[:space:]' | base64 -d --ignore-garbage > ~/.ssh/oracle_key.pub; then
-            echo "::error::Secret 'SSH_PUB_B64' is not valid base64. Re-encode with: base64 -w 0 <file>."
-            exit 1
-          fi
+          printf '%s' "$SSH_PUB_B64" | tr -d '[:space:]' | base64 -d --ignore-garbage > ~/.ssh/oracle_key.pub
           chmod 644 ~/.ssh/oracle_key.pub
 
       - name: Create oci.env
@@ -96,39 +87,123 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$OCI_ENV_B64" ]; then
-            echo "::error::Secret 'OCI_ENV_B64' is empty or not set."
+            echo "::error::OCI_ENV_B64 is empty."
             exit 1
           fi
-          if ! printf '%s' "$OCI_ENV_B64" | tr -d '[:space:]' | base64 -d --ignore-garbage > oci.env; then
-            echo "::error::Secret 'OCI_ENV_B64' is not valid base64. Re-encode with: base64 -w 0 <file>."
-            exit 1
-          fi
+          printf '%s' "$OCI_ENV_B64" | tr -d '[:space:]' | base64 -d --ignore-garbage > oci.env
+
+      - name: Send Telegram "Starting" notification
+        if: ${{ env.TELEGRAM_BOT_TOKEN != '' }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          # Auto-discover chat IDs and send start message
+          python3 << 'PYEOF'
+          import os, requests
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          if not token:
+              exit(0)
+          try:
+              r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", timeout=10)
+              data = r.json()
+              chats = set()
+              for u in data.get("result", []):
+                  m = u.get("message") or u.get("edited_message") or u.get("channel_post")
+                  if m and m.get("chat"):
+                      chats.add(m["chat"]["id"])
+              if not chats:
+                  print("No chats yet. Send /start to bot once.")
+                  exit(0)
+              # Save chat IDs for next steps
+              with open("tg_chats.txt", "w") as f:
+                  f.write(",".join(str(c) for c in chats))
+              from datetime import datetime
+              msg = f"🔄 ARM retry run started at {datetime.utcnow().strftime('%H:%M UTC')}"
+              for c in chats:
+                  requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                      json={"chat_id": c, "text": msg, "disable_notification": True}, timeout=10)
+              print(f"Sent start notification to {len(chats)} chat(s)")
+          except Exception as e:
+              print(f"Telegram notify error: {e}")
+          PYEOF
 
       - name: Run Oracle Instance Creation Script
+        id: run_script
+        continue-on-error: true
         env:
-          # Sensitive values passed as real GitHub Secrets (not hardcoded)
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Overrides whatever is in oci.env - retry every 50 seconds
           REQUEST_WAIT_TIME_SECS: "50"
         run: |
-          # Run continuously for up to 4 minutes (leaving 1 min buffer before next scheduled run)
           timeout 240 python main.py
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
 
       - name: Check for Instance Created
         if: always()
+        id: check_instance
         run: |
           if [ -f "INSTANCE_CREATED" ]; then
-            echo "🎉 INSTANCE CREATED SUCCESSFULLY!"
+            echo "🎉 INSTANCE CREATED!"
             cat INSTANCE_CREATED
-            # Create a summary for GitHub Actions UI
             echo "## Oracle Instance Created" >> $GITHUB_STEP_SUMMARY
             cat INSTANCE_CREATED >> $GITHUB_STEP_SUMMARY
+            echo "status=success" >> $GITHUB_OUTPUT
           else
-            echo "No instance created yet, will retry on next run"
+            echo "No instance this run"
+            echo "status=no_capacity" >> $GITHUB_OUTPUT
           fi
+
+      - name: Send Telegram "Finished" notification
+        if: always() && env.TELEGRAM_BOT_TOKEN != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          STATUS: ${{ steps.check_instance.outputs.status }}
+          SCRIPT_OUTCOME: ${{ steps.run_script.outcome }}
+        run: |
+          python3 << 'PYEOF'
+          import os, requests
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          status = os.environ.get("STATUS", "unknown")
+          outcome = os.environ.get("SCRIPT_OUTCOME", "unknown")
+          if not token:
+              exit(0)
+          # Get cached chat IDs
+          chats = []
+          try:
+              with open("tg_chats.txt") as f:
+                  chats = [c.strip() for c in f.read().split(",") if c.strip()]
+          except FileNotFoundError:
+              # Re-discover
+              try:
+                  r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", timeout=10)
+                  for u in r.json().get("result", []):
+                      m = u.get("message") or u.get("edited_message")
+                      if m and m.get("chat"):
+                          chats.append(str(m["chat"]["id"]))
+              except Exception:
+                  pass
+          if not chats:
+              print("No chats to notify")
+              exit(0)
+          from datetime import datetime
+          t = datetime.utcnow().strftime('%H:%M UTC')
+          if status == "success":
+              msg = f"✅ Run finished at {t} — Instance exists! Check previous messages for details."
+              silent = False
+          elif outcome == "success":
+              msg = f"✓ Run finished at {t} — no capacity, will retry in 5 min"
+              silent = True
+          else:
+              # script failed or timed out — expected during retry
+              msg = f"⏳ Run ended at {t} — still trying for capacity (next attempt in 5 min)"
+              silent = True
+          for c in chats:
+              try:
+                  requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                      json={"chat_id": c, "text": msg, "disable_notification": silent}, timeout=10)
+              except Exception as e:
+                  print(f"send error: {e}")
+          print(f"Sent finish notification: {msg}")
+          PYEOF
 
       - name: Upload logs as artifacts
         if: always()
